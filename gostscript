@@ -16,8 +16,9 @@ class String
   def gray; "\033[37m#{self}\033[0m" end
 end
 
-$name = "test"
-$password = "test"
+require "securerandom"
+$name = SecureRandom.hex
+$password = SecureRandom.hex
 $default_port = 8087
 $gost_service_path = "/etc/systemd/system/gost.service"
 $iptables_service_path = "/etc/systemd/system/iptables.service"
@@ -27,27 +28,12 @@ def download_gost
 
   %x(wget -qO gost.gz https://github.com/ginuerzh/gost/releases/download/v2.11.0/gost-linux-amd64-2.11.0.gz && gzip -d gost.gz )
 
-  while $? != 0
-    sleep(0.5)
-    print "."
-  end
-
   puts "Gost download successfully ".green
   %x(chmod +x gost && mv gost /usr/local/bin/)
 end
 
 def make_gost_service
   puts "Making gost systemd service and start".green
-  print "Auth name: "
-  $name = gets.chomp
-  print "Auth password: "
-  $password = gets.chomp
-  print "Listen port: "
-  $default_port = gets.chomp
-  while ($default_port.to_i > 65535 || $default_port.to_i < 1024)
-    print "Listen port (1024-65535): "
-    $default_port = gets.chomp
-  end
   File.open($gost_service_path, "w+") do |f|
     f.write <<~EOF
               [Unit]
