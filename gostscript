@@ -1,0 +1,188 @@
+#!/bin/env ruby
+
+if Process.uid != 0
+  $stderr.puts("You must run this script with root privileges via sudo").red
+  exit(1)
+end
+
+class String
+  def black; "\033[30m#{self}\033[0m" end
+  def red; "\033[31m#{self}\033[0m" end
+  def green; "\033[32m#{self}\033[0m" end
+  def brown; "\033[33m#{self}\033[0m" end
+  def blue; "\033[34m#{self}\033[0m" end
+  def magenta; "\033[35m#{self}\033[0m" end
+  def cyan; "\033[36m#{self}\033[0m" end
+  def gray; "\033[37m#{self}\033[0m" end
+end
+
+$default_port = 8087
+$gost_service_path = "/etc/systemd/system/gost.service"
+$iptables_service_path = "/etc/systemd/system/iptables.service"
+
+def download_gost
+  puts "Download gost from github .... ".green
+
+  %x(wget -qO gost.gz https://github.com/ginuerzh/gost/releases/download/v2.11.0/gost-linux-amd64-2.11.0.gz && gzip -d gost.gz )
+
+  while $? != 0
+    sleep(0.5)
+    print "."
+  end
+
+  puts "Gost download successfully ".green
+  %x(chmod +x gost && mv gost /usr/local/bin/)
+end
+
+def make_gost_service
+  puts "Making gost systemd service and start".green
+  print "Auth name: "
+  name = gets.chomp
+  print "Auth password: "
+  password = gets.chomp
+  print "Listen port: "
+  $default_port = gets.chomp
+  while ($default_port.to_i > 65535 || $default_port.to_i < 1024)
+    print "Listen port (1024-65535): "
+    $default_port = gets.chomp
+  end
+  File.open($gost_service_path, "w+") do |f|
+    f.write <<~EOF
+              [Unit]
+              Description=Gost Service
+              After=network.target
+              Wants=network.target
+
+              [Service]
+              Type=simple
+              PIDFile=/run/gost.pid
+              ExecStart=/usr/local/bin/gost -L=kcp://#{name}:#{password}@:#{$default_port}
+              Restart=on-failure
+              # Don't restart in the case of configuration error
+              RestartPreventExitStatus=23
+
+              [Install]
+              WantedBy=multi-user.target
+
+            EOF
+  end
+
+  %x(systemctl -q enable gost && systemctl start gost)
+  puts "Gost service enabled and started !!".green
+end
+
+def firewall
+  File.open("/root/firewall", "w+") do |f|
+    f.write <<~RULES
+              iptables -F
+              iptables -t nat -F
+              iptables -X
+
+              iptables -A INPUT -i lo -j ACCEPT
+
+              iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 3/m --limit-burst 5 -j ACCEPT
+              iptables -A OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT
+              iptables -A OUTPUT -p icmp --icmp-type echo-request -j ACCEPT
+              iptables -A INPUT -p icmp --icmp-type echo-reply -j ACCEPT
+
+              iptables -P INPUT DROP
+              iptables -P OUTPUT ACCEPT
+              iptables -P FORWARD ACCEPT
+
+              iptables -A INPUT -p udp -j ACCEPT
+              iptables -A INPUT -p tcp -m state --state ESTABLISHED -j ACCEPT
+              iptables -A INPUT -p tcp -m multiport --dports 22,80,443,#{$default_port} -j ACCEPT
+            RULES
+  end
+
+  %x(chmod +x /root/firewall && /root/firewall && iptables-save >> /etc/iptables.conf)
+end
+
+def make_iptables_service
+  firewall
+  unless File.file?("/etc/iptables.conf")
+    %x(touch /etc/iptables.conf)
+  end
+  File.open($iptables_service_path, "w+") do |f|
+    f.write <<~EOF
+              [Unit]
+              Description=Restore Iptables Rules
+              
+              [Service]
+              Type=oneshot
+              ExecStart=/sbin/iptables-restore /etc/iptables.conf
+              
+              [Install]
+              WantedBy=multi-user.target
+            EOF
+  end
+
+  %x(systemctl -q enable iptables && systemctl start iptables)
+  puts "Iptables service enabled and started !!".green
+end
+
+def clean_all
+  %x(systemctl stop gost && systemctl stop iptables && systemctl disable gost && systemctl disable iptables)
+  %x(systemctl daemon-reload && systemctl reset-failed)
+end
+
+def system_optimize
+  conf_path = "/etc/sysctl.d/11-vps-optimize.conf"
+  File.open(conf_path, "w+") do |f|
+    f.write <<~EOF
+              net.ipv4.icmp_echo_ignore_broadcasts = 1
+              net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+              # Turn on SYN cookies to protect from SYN flood attacks.
+              net.ipv4.tcp_syncookies = 1
+              net.ipv4.tcp_max_syn_backlog = 2048
+              net.ipv4.tcp_synack_retries = 3
+
+              net.ipv4.conf.all.log_martians = 1
+              net.ipv4.conf.default.log_martians = 1
+
+              net.ipv4.conf.all.accept_source_route = 0
+              net.ipv4.conf.default.accept_source_route  = 0
+
+              net.ipv4.conf.all.rp_filter = 1
+              net.ipv4.conf.default.rp_filter = 1
+
+              net.ipv4.tcp_rmem = 4096 87380 8388608
+              net.ipv4.tcp_wmem = 4096 87380 8388608
+
+              net.ipv4.tcp_window_scaling = 1
+              net.ipv4.ip_forward = 0
+
+              net.ipv6.conf.all.disable_ipv6 = 1
+
+              net.ipv4.neigh.default.base_reachable_time_ms = 600000
+              net.ipv4.neigh.default.mcast_solicit = 20
+              net.ipv4.neigh.default.retrans_time_ms = 250
+
+              net.core.default_qdisc=fq
+              net.ipv4.tcp_congestion_control=bbr
+
+              net.ipv4.tcp_fastopen=3
+              net.core.rmem_max=26214400 // BDP - bandwidth delay product
+              net.core.rmem_default=26214400
+              net.core.wmem_max=26214400
+              net.core.wmem_default=26214400
+              net.core.netdev_max_backlog=2048 // proportional to -rcvwnd
+            EOF
+  end
+  %x(sysctl -p #{conf_path}) # read new config file
+  puts "System tuned . ".green
+end
+
+def enable_bbrplus
+  %x(wget -qhttps://raw.githubusercontent.com/coolfors/BBRandBBRPlus/master/tcp.sh && chmod +x tcp.sh )
+  puts "Please run tcp.sh yourself !!".red
+  puts "Dont forget add your public key!!".blue
+end
+
+clean_all
+download_gost
+make_gost_service
+make_iptables_service
+system_optimize
+enable_bbrplus
