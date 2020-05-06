@@ -16,6 +16,8 @@ class String
   def gray; "\033[37m#{self}\033[0m" end
 end
 
+$name = "test"
+$password = "test"
 $default_port = 8087
 $gost_service_path = "/etc/systemd/system/gost.service"
 $iptables_service_path = "/etc/systemd/system/iptables.service"
@@ -37,9 +39,9 @@ end
 def make_gost_service
   puts "Making gost systemd service and start".green
   print "Auth name: "
-  name = gets.chomp
+  $name = gets.chomp
   print "Auth password: "
-  password = gets.chomp
+  $password = gets.chomp
   print "Listen port: "
   $default_port = gets.chomp
   while ($default_port.to_i > 65535 || $default_port.to_i < 1024)
@@ -56,7 +58,7 @@ def make_gost_service
               [Service]
               Type=simple
               PIDFile=/run/gost.pid
-              ExecStart=/usr/local/bin/gost -L=kcp://#{name}:#{password}@:#{$default_port}
+              ExecStart=/usr/local/bin/gost -L=kcp://#{$name}:#{$password}@:#{$default_port}
               Restart=on-failure
               # Don't restart in the case of configuration error
               RestartPreventExitStatus=23
@@ -69,6 +71,28 @@ def make_gost_service
 
   %x(systemctl -q enable gost && systemctl start gost)
   puts "Gost service enabled and started !!".green
+end
+
+def make_client_service
+  public_ip = %x(curl -s ifconfig.me)
+  File.open("./gost_client.service", "w+") do |f|
+    f.write <<~DOCS
+              [Unit]
+              Description=Gost Service Client
+              After=network.target
+              Wants=network.target
+
+              [Service]
+              Type=simple
+              PIDFile=/run/gost_client.pid
+              ExecStart=/usr/local/bin/gost -L=:8888 -F=kcp://#{$name}:#{$password}@#{public_ip}:#{$default_port}
+              Restart=on-failure
+              RestartPreventExitStatus=23
+
+              [Install]
+              WantedBy=multi-user.target
+            DOCS
+  end
 end
 
 def firewall
@@ -175,14 +199,16 @@ def system_optimize
 end
 
 def enable_bbrplus
-  %x(wget -qhttps://raw.githubusercontent.com/coolfors/BBRandBBRPlus/master/tcp.sh && chmod +x tcp.sh )
-  puts "Please run tcp.sh yourself !!".red
+  %x(wget -N -q https://raw.githubusercontent.com/coolfors/BBRandBBRPlus/master/tcp.sh && chmod +x tcp.sh )
+  %x(wget -N -q https://raw.githubusercontent.com/sjlleo/bbr2/master/bbr2.sh && chmod +x bbr2.sh)
+  puts "Please run tcp.sh or bbr2.sh yourself !!".red
   puts "Dont forget add your public key!!".blue
 end
 
 clean_all
 download_gost
 make_gost_service
+make_client_service
 make_iptables_service
 system_optimize
 enable_bbrplus
